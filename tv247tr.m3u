@@ -1,18 +1,5 @@
  
 #EXTM3U
-#EXTINF:-1 tvg-logo="" group-title="İNFO",BİLGİ
-https://clips.kick.com/clips/17/clip_01M535NWA4ZV5XGHSP0BPYRHRM/playlist.m3u8
-
-#EXTINF:-1 tvg-logo="" group-title="Spor-TV",BEİN SPORTS 1-TV
-https://pdg854df9gddsfg59xfcg5695df9g85s9fdgsd9f5g95d5fhg9.pokemon596.store/osldfgo9569s6gstreyhdfghsddfg/secure/3de9fd428608a2086b64fdfb9e50f7a8496f1618a2af8f0f2e623582625f59c5/1795038877/bein1tr.m3u8
-#EXTINF:-1 tvg-logo="" group-title="Spor-TV",BEİN SPORTS 2-TV
-https://pdg854df9gddsfg59xfcg5695df9g85s9fdgsd9f5g95d5fhg9.pokemon596.store/osldfgo9569s6gstreyhdfghsddfg/secure/8c49396968bbdd4b79dcaea94483b9047eace93f795552f6b86b08888edafff1/1795038883/bein2tr.m3u8
-#EXTINF:-1 tvg-logo="" group-title="Spor-TV",BEİN SPORTS 3-TV
-https://pdg854df9gddsfg59xfcg5695df9g85s9fdgsd9f5g95d5fhg9.pokemon596.store/osldfgo9569s6gstreyhdfghsddfg/secure/41f6e3335e319538155816f22c72085720d45cc177bdbda96709bd980290c936/1795038890/bein3tr.m3u8
-#EXTINF:-1 tvg-logo="" group-title="Spor-TV",BEİN SPORTS 4-TV
-https://bosssports1111.com/player.php?source=https%3A%2F%2F1.vanusmakitakosux7.cfd%2Fstream%2F21028621.m3u8%3Fkid%3Dcust_8094%26stream%3D21028621%26expires%3D1795038603%26sign%3D808028b4ec8126d429caaf3a5e9005b70759202c8e66dbc2951cad7a7d677498&lang=en
-#EXTINF:-1 tvg-logo="" group-title="Spor-TV",BEİN SPORTS 5-TV
-https://bosssports1111.com/player.php?source=https%3A%2F%2F1.vanusmakitakosux7.cfd%2Fstream%2F21028621.m3u8%3Fkid%3Dcust_8094%26stream%3D21028621%26expires%3D1795038603%26sign%3D808028b4ec8126d429caaf3a5e9005b70759202c8e66dbc2951cad7a7d677498&lang=en
 
 #EXTINF:-1 tvg-name="Bein Sports 1 TR" tvg-logo="bein-sports-1-4k.png" group-title="Spor-BS",Bein Sports 1 TR
 #EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36
