@@ -1,10 +1,12 @@
-
 import asyncio
 import concurrent.futures
-import os 
-import requests
+import os
+import re
 import tempfile
+import unicodedata
 from pathlib import Path
+
+import requests
 from playwright.async_api import async_playwright
 
 # ==================================================
@@ -91,6 +93,18 @@ CHANNELS_TO_UPDATE = [
         "path": "?channel=channel%3Atflix-MDY0NDRjNTZkY2RmMWUwMg"
     }
 ]
+
+# ==================================================
+# KANAL ADI NORMALİZASYONU
+# ==================================================
+
+def normalize_channel_name(name: str) -> str:
+    cleaned = re.sub(r"\s*-\s*BS\b.*$", "", name, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("İ", "I").replace("ı", "i")
+    cleaned = unicodedata.normalize("NFKD", cleaned)
+    cleaned = "".join(ch for ch in cleaned if not unicodedata.combining(ch))
+    cleaned = re.sub(r"[^A-Za-z0-9]+", " ", cleaned).strip().lower()
+    return cleaned
 
 # ==================================================
 # DOMAIN KONTROLÜ
@@ -202,7 +216,6 @@ def get_active_base_domain():
         "Belirtilen aralıkta aktif domain bulunamadı!"
     )
 
-
 # ==================================================
 # PLAYWRIGHT İLE M3U8 TESPİTİ
 # ==================================================
@@ -241,7 +254,6 @@ async def get_stream_url(page, full_url):
 
     return stream_url
 
-
 # ==================================================
 # M3U DOSYASI GÜNCELLEME
 # ==================================================
@@ -259,6 +271,12 @@ def update_playlist(updated_links):
             "Playlist değiştirilmedi."
         )
 
+    normalized_links = {}
+    for channel_name, stream_url in updated_links.items():
+        norm_key = normalize_channel_name(channel_name)
+        if norm_key:
+            normalized_links[norm_key] = (channel_name, stream_url)
+
     with OUTPUT_FILE.open(
         "r",
         encoding="utf-8-sig"
@@ -268,21 +286,22 @@ def update_playlist(updated_links):
 
     new_lines = []
     updated_count = 0
+    matched_keys = set()
     i = 0
 
     while i < len(lines):
 
         line = lines[i]
+        matched_key = None
 
-        matched_channel = None
+        if line.lstrip().startswith("#EXTINF"):
+            norm_line = normalize_channel_name(line)
+            for norm_key in sorted(normalized_links.keys(), key=len, reverse=True):
+                if re.search(rf"(?:^|\s){re.escape(norm_key)}(?:\s|$)", norm_line):
+                    matched_key = norm_key
+                    break
 
-        for channel_name in updated_links:
-
-            if channel_name in line:
-                matched_channel = channel_name
-                break
-
-        if matched_channel:
+        if matched_key:
 
             new_lines.append(line)
             i += 1
@@ -298,16 +317,16 @@ def update_playlist(updated_links):
             # Eski URL satırını yeni URL ile değiştir.
             if i < len(lines) and not lines[i].strip().startswith("#"):
 
-                new_lines.append(
-                    updated_links[matched_channel] + "\n"
-                )
-
+                orig_name, new_url = normalized_links[matched_key]
+                new_lines.append(new_url + "\n")
+                matched_keys.add(matched_key)
                 updated_count += 1
                 i += 1
 
             else:
+                orig_name, _ = normalized_links[matched_key]
                 print(
-                    f"UYARI: {matched_channel} için "
+                    f"UYARI: {orig_name} için "
                     "eski URL satırı bulunamadı."
                 )
 
@@ -315,6 +334,17 @@ def update_playlist(updated_links):
 
             new_lines.append(line)
             i += 1
+
+    unmatched_names = [
+        orig_name
+        for norm_key, (orig_name, _) in normalized_links.items()
+        if norm_key not in matched_keys
+    ]
+    if unmatched_names:
+        print(
+            "UYARI: M3U içinde eşleşmeyen kanallar: "
+            + ", ".join(unmatched_names)
+        )
 
     if updated_count == 0:
         raise RuntimeError(
@@ -346,7 +376,6 @@ def update_playlist(updated_links):
         f"Playlist güncellendi. "
         f"Toplam güncellenen kanal: {updated_count}"
     )
-
 
 # ==================================================
 # ANA PROGRAM
@@ -410,7 +439,6 @@ async def main():
     update_playlist(updated_links)
 
     print("\nİŞLEM BAŞARIYLA TAMAMLANDI!")
-
 
 # ==================================================
 # PROGRAM BAŞLANGICI
