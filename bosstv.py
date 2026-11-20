@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urlsplit
 import requests
 
 API_URL = "https://bosssports1079.com/api/matches"
@@ -13,6 +13,13 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Referer": "https://bosssports1079.com/",
 }
+
+
+def get_referrer_from_api_url(api_url: str) -> str:
+    parsed = urlsplit(api_url)
+    if parsed.scheme and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}/"
+    return "https://bosssports1079.com/"
 
 
 def extract_m3u8_from_item(item: dict) -> list[str]:
@@ -31,12 +38,14 @@ def extract_m3u8_from_item(item: dict) -> list[str]:
                 if isinstance(s_url, str) and ".m3u8" in s_url.lower():
                     found.append(s_url.strip())
 
-    # Tekrarları sırayı bozmadan temizle
     return list(dict.fromkeys(found))
 
 
 def main(api_url: str = API_URL, out_m3u: Path = Path("matches.m3u")):
-    resp = requests.get(api_url, headers=HEADERS, timeout=15)
+    referrer = get_referrer_from_api_url(api_url)
+    headers = {**HEADERS, "Referer": referrer}
+
+    resp = requests.get(api_url, headers=headers, timeout=15)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -62,12 +71,15 @@ def main(api_url: str = API_URL, out_m3u: Path = Path("matches.m3u")):
         for idx, link in enumerate(links, start=1):
             suffix = f" ({idx})" if len(links) > 1 else ""
             m3u_lines.append(f"#EXTINF:-1,{title}{suffix}\n")
+            m3u_lines.append(f"#EXTVLCOPT:http-referrer={referrer}\n")
             m3u_lines.append(f"{link}\n")
             total_links += 1
-            print(f"{title}{suffix} -> {link}")
+            print(f"{title}{suffix}")
+            print(f"#EXTVLCOPT:http-referrer={referrer}")
+            print(f"{link}\n")
 
     out_m3u.write_text("".join(m3u_lines), encoding="utf-8")
-    print(f"\nToplam {total_links} bağlantı '{out_m3u}' dosyasına kaydedildi.")
+    print(f"Toplam {total_links} bağlantı '{out_m3u}' dosyasına kaydedildi.")
 
 
 if __name__ == "__main__":
