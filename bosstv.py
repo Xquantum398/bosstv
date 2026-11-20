@@ -6,7 +6,7 @@ import re
 import tempfile
 import unicodedata
 from pathlib import Path
-from urllib.parse import quote, urljoin
+from urllib.parse import urljoin
 
 import requests
 from playwright.async_api import async_playwright
@@ -109,6 +109,25 @@ CHANNELS_TO_UPDATE = [
         "path": "?channel=channel%3Atflix-MDY0NDRjNTZkY2RmMWUwMg"
     }
 ]
+
+# API kayıtlarında lig/takım/yayın adıyla eşleşecek ek anahtar kelimeler
+CHANNEL_MATCH_KEYWORDS = {
+    "BEİN SPORTS 1-BS": ["bein sports 1", "super lig", "süper lig"],
+    "BEİN SPORTS 2-BS": ["bein sports 2"],
+    "BEİN SPORTS 3-BS": ["bein sports 3"],
+    "BEİN SPORTS 4-BS": ["bein sports 4"],
+    "BEİN SPORTS 5-BS": ["bein sports 5"],
+    "BEİN SPORTS MAX 1-BS": ["bein sports max 1", "bein max 1"],
+    "BEİN SPORTS MAX 2-BS": ["bein sports max 2", "bein max 2"],
+    "BEİN SPORTS HABER-BS": ["bein sports haber", "bein haber"],
+    "S SPORT-BS": ["s sport", "ssport"],
+    "S SPORT 2-BS": ["s sport 2", "ssport 2"],
+    "EUROSPORT 1-BS": ["eurosport 1", "eurosport"],
+    "EUROSPORT 2-BS": ["eurosport 2"],
+    "SPOR SMART-BS": ["spor smart", "smart spor"],
+    "SPOR SMART 2-BS": ["spor smart 2", "smart spor 2"],
+    "ATV-BS": ["atv", "turkish first league", "1 lig", "1. lig", "trtspor", "trt spor"],
+}
 
 FALLBACK_STREAM_LINKS = {
     "BEİN SPORTS 2-BS": (
@@ -285,9 +304,8 @@ def _extract_m3u8_from_item(item: dict):
 
 def enrich_channels_from_matches(matches_data, base_channels):
     """
-    /api/matches JSON içindeki `data` dizisini tarayarak:
-    - doğrudan .m3u8 URL'lerini (`videoid` / `streams[].url`) yakalar
-    - güncel maç/kanal bilgisini eşleştirir
+    /api/matches JSON içindeki `data` dizisini tarayarak kanal adı veya
+    anahtar kelimelere göre doğrudan .m3u8 (`videoid` / `streams[].url`) yakalar.
     """
     if not isinstance(matches_data, dict):
         return base_channels
@@ -296,16 +314,25 @@ def enrich_channels_from_matches(matches_data, base_channels):
     if not isinstance(items, list) or not items:
         return base_channels
 
-    target_map = {
-        normalize_channel_name(ch["name"]): idx
-        for idx, ch in enumerate(base_channels)
-    }
-
     enriched = [dict(ch) for ch in base_channels]
     matched_count = 0
 
+    # Her kanal için aranacak normalleştirilmiş ifadeler (kanal adı + ek anahtar kelimeler)
+    channel_patterns = []
+    for idx, ch in enumerate(enriched):
+        phrases = [normalize_channel_name(ch["name"])]
+        for kw in CHANNEL_MATCH_KEYWORDS.get(ch["name"], []):
+            norm_kw = normalize_channel_name(kw)
+            if norm_kw and norm_kw not in phrases:
+                phrases.append(norm_kw)
+        channel_patterns.append((idx, ch["name"], phrases))
+
     for item in items:
         if not isinstance(item, dict):
+            continue
+
+        m3u8_url = _extract_m3u8_from_item(item)
+        if not m3u8_url:
             continue
 
         text_parts = []
@@ -321,19 +348,22 @@ def enrich_channels_from_matches(matches_data, base_channels):
         if not combined_norm:
             continue
 
-        m3u8_url = _extract_m3u8_from_item(item)
-
-        for norm_key, idx in sorted(target_map.items(), key=lambda x: len(x[0]), reverse=True):
-            if norm_key and re.search(rf"(?:^|\s){re.escape(norm_key)}(?:\s|$)", combined_norm):
-                if m3u8_url and "direct_m3u8" not in enriched[idx]:
-                    enriched[idx]["direct_m3u8"] = m3u8_url
-                    matched_count += 1
+        for idx, ch_name, phrases in channel_patterns:
+            if "direct_m3u8" in enriched[idx]:
+                continue
+            if any(
+                p and re.search(rf"(?:^|\s){re.escape(p)}(?:\s|$)", combined_norm)
+                for p in phrases
+            ):
+                enriched[idx]["direct_m3u8"] = m3u8_url
+                matched_count += 1
+                print(f"API eşleşti [{ch_name}] -> {m3u8_url}")
                 break
 
     if matched_count > 0:
-        print(f"API üzerinden {matched_count} kanal için doğrudan M3U8 eşleştirildi.")
+        print(f"API üzerinden {matched_count} kanal için doğrudan M3U8 alındı.")
     else:
-        print("API 'data' içinde kanal adıyla doğrudan eşleşen kayıt bulunmadı; Playwright taramasına geçiliyor.")
+        print("API 'data' içinde eşleşen kayıt bulunmadı; Playwright taramasına geçiliyor.")
 
     return enriched
 
@@ -531,7 +561,6 @@ async def main():
     for ch in channels:
         if ch.get("direct_m3u8"):
             updated_links[ch["name"]] = ch["direct_m3u8"]
-            print(f"\nTaranıyor: {ch['name']}\nAPI üzerinden doğrudan M3U8 alındı: {ch['direct_m3u8']}")
         else:
             pending_channels.append(ch)
 
