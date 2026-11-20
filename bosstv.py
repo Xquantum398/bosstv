@@ -33,8 +33,14 @@ PAGE_TIMEOUT = 45000
 WAIT_AFTER_LOAD = 6000
 MAX_CONSECUTIVE_NET_ERRORS = 3
 
+DESKTOP_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+
 # ==================================================
-# KANAL LİSTESİ
+# KANAL LİSTESİ & YEDEK BAĞLANTILAR
 # ==================================================
 
 CHANNELS_TO_UPDATE = [
@@ -100,6 +106,16 @@ CHANNELS_TO_UPDATE = [
     }
 ]
 
+# Yakalama başarısız olursa kullanılacak yedek bağlantılar
+FALLBACK_STREAM_LINKS = {
+    "BEİN SPORTS 2-BS": (
+        "https://pdg854df9gddsfg59xfcg5695df9g85s9fdgsd9f5g95d5fhg9.pokemon596.store/"
+        "osldfgo9569s6gstreyhdfghsddfg/secure/"
+        "63ec16c3206c36f2487d26811ad957c42434762483eb6cc9e484b164100553ef/"
+        "1795208018/bein2tr.m3u8"
+    )
+}
+
 # ==================================================
 # KANAL ADI NORMALİZASYONU
 # ==================================================
@@ -117,13 +133,8 @@ def normalize_channel_name(name: str) -> str:
 # ==================================================
 
 def test_url_is_active(url: str):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+    """Aktifse (True, sebep) döner; değilse (False, sebep) döner."""
+    headers = {"User-Agent": DESKTOP_USER_AGENT}
 
     try:
         with requests.get(
@@ -220,6 +231,28 @@ def is_fatal_net_error(error_text: str) -> bool:
     return any(code in error_text for code in fatal_codes)
 
 
+async def trigger_player_interaction(page):
+    """Oynatıcı veya iframe içindeki oynat düğmesini tetiklemeyi dener."""
+    try:
+        # Ana sayfadaki video / oynat düğmesine tıklama denemesi
+        for selector in ("video", "button[aria-label*='play' i]", ".vjs-big-play-button", ".jw-icon-display"):
+            loc = page.locator(selector).first
+            if await loc.count() > 0:
+                await loc.click(timeout=1500, force=True)
+                break
+
+        # Varsa ilk iframe ortasına tıklama denemesi
+        for frame in page.frames:
+            if frame != page.main_frame:
+                try:
+                    await frame.locator("body").click(timeout=1500, force=True)
+                    break
+                except Exception:
+                    continue
+    except Exception:
+        pass
+
+
 async def get_stream_url(page, full_url: str):
     stream_url = None
     fatal_net_error = False
@@ -248,7 +281,11 @@ async def get_stream_url(page, full_url: str):
             timeout=PAGE_TIMEOUT
         )
 
-        await page.wait_for_timeout(WAIT_AFTER_LOAD)
+        await page.wait_for_timeout(WAIT_AFTER_LOAD // 2)
+
+        if stream_url is None:
+            await trigger_player_interaction(page)
+            await page.wait_for_timeout(WAIT_AFTER_LOAD // 2)
 
     except Exception as error:
         error_msg = str(error)
@@ -371,9 +408,14 @@ async def main():
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(
+            user_agent=DESKTOP_USER_AGENT,
+            locale="tr-TR",
+            viewport={"width": 1366, "height": 768}
+        )
 
         try:
-            page = await browser.new_page()
+            page = await context.new_page()
 
             for channel in CHANNELS_TO_UPDATE:
                 full_url = active_base_url + channel["path"]
@@ -386,11 +428,17 @@ async def main():
                     consecutive_net_errors = 0
                     print("Bağlantı başarıyla alındı.")
                 else:
-                    print("Yeni bağlantı alınamadı. Eski bağlantı korunacak.")
+                    fallback_url = FALLBACK_STREAM_LINKS.get(channel["name"])
+                    if fallback_url and not fatal_net_error:
+                        updated_links[channel["name"]] = fallback_url
+                        print("Yeni bağlantı yakalanamadı, yedek bağlantı kullanıldı.")
+                    else:
+                        print("Yeni bağlantı alınamadı. Eski bağlantı korunacak.")
+
                     if fatal_net_error:
                         consecutive_net_errors += 1
                         await page.close()
-                        page = await browser.new_page()
+                        page = await context.new_page()
                     else:
                         consecutive_net_errors = 0
 
@@ -403,6 +451,7 @@ async def main():
                     break
 
         finally:
+            await context.close()
             await browser.close()
 
     if domain_dead and CACHE_FILE.exists():
