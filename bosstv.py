@@ -26,6 +26,7 @@ MAX_WORKERS = 50
 REQUEST_TIMEOUT = 5
 PAGE_TIMEOUT = 45000
 WAIT_AFTER_LOAD = 6000
+MAX_CONSECUTIVE_NET_ERRORS = 3
 
 # ==================================================
 # KANAL LİSTESİ
@@ -110,70 +111,38 @@ def normalize_channel_name(name: str) -> str:
 # DOMAIN KONTROLÜ
 # ==================================================
 
-def test_url_is_active(url):
+def test_url_is_active(url: str) -> bool:
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
     }
 
     try:
-        response = requests.head(
+        with requests.get(
             url,
             headers=headers,
             timeout=REQUEST_TIMEOUT,
-            allow_redirects=True
-        )
-
-        if response.status_code < 400:
-            return True
-
-        if response.status_code in (403, 405):
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-                stream=True
-            )
-
-            active = response.status_code < 400
-            response.close()
-            return active
-
+            allow_redirects=True,
+            stream=True
+        ) as response:
+            return response.status_code < 400
+    except requests.RequestException:
         return False
 
-    except requests.RequestException:
-        try:
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=REQUEST_TIMEOUT,
-                allow_redirects=True,
-                stream=True
-            )
 
-            active = response.status_code < 400
-            response.close()
-            return active
-
-        except requests.RequestException:
-            return False
-
-
-def check_single_domain_num(num):
+def check_single_domain_num(num: int):
     url = f"{BASE_PREFIX}{num}{BASE_SUFFIX}"
-
     if test_url_is_active(url):
         return url
-
     return None
 
 
-def get_active_base_domain():
-
+def get_active_base_domain() -> str:
     if CACHE_FILE.exists():
-        cached_url = CACHE_FILE.read_text(
-            encoding="utf-8"
-        ).strip()
+        cached_url = CACHE_FILE.read_text(encoding="utf-8").strip()
 
         if cached_url and test_url_is_active(cached_url):
             print(f"Aktif cache domaini: {cached_url}")
@@ -181,15 +150,9 @@ def get_active_base_domain():
 
         print("Cache domaini çalışmıyor, yeni domain aranıyor.")
 
-    print(
-        f"Domain taraması başladı: "
-        f"{START_NUM}-{END_NUM - 1}"
-    )
+    print(f"Domain taraması başladı: {START_NUM}-{END_NUM - 1}")
 
-    with concurrent.futures.ThreadPoolExecutor(
-        max_workers=MAX_WORKERS
-    ) as executor:
-
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
             executor.submit(check_single_domain_num, num)
             for num in range(START_NUM, END_NUM)
@@ -198,42 +161,48 @@ def get_active_base_domain():
         for future in concurrent.futures.as_completed(futures):
             try:
                 result = future.result()
-
                 if result:
                     print(f"Aktif domain bulundu: {result}")
-
-                    CACHE_FILE.write_text(
-                        result,
-                        encoding="utf-8"
-                    )
-
+                    CACHE_FILE.write_text(result, encoding="utf-8")
                     return result
-
             except Exception as error:
                 print(f"Domain kontrol hatası: {error}")
 
-    raise RuntimeError(
-        "Belirtilen aralıkta aktif domain bulunamadı!"
-    )
+    raise RuntimeError("Belirtilen aralıkta aktif domain bulunamadı!")
 
 # ==================================================
 # PLAYWRIGHT İLE M3U8 TESPİTİ
 # ==================================================
 
-async def get_stream_url(page, full_url):
+def is_fatal_net_error(error_text: str) -> bool:
+    fatal_codes = (
+        "ERR_NAME_NOT_RESOLVED",
+        "ERR_CONNECTION_REFUSED",
+        "ERR_CONNECTION_RESET",
+        "ERR_TIMED_OUT",
+        "ERR_INTERNET_DISCONNECTED",
+    )
+    return any(code in error_text for code in fatal_codes)
 
+
+async def get_stream_url(page, full_url: str):
     stream_url = None
+    fatal_net_error = False
 
     def handle_request(request):
-
         nonlocal stream_url
-
         if ".m3u8" in request.url.lower() and stream_url is None:
             stream_url = request.url
-
             print(f"M3U8 bulundu: {stream_url}")
 
+    def handle_response(response):
+        nonlocal stream_url
+        if ".m3u8" in response.url.lower() and stream_url is None:
+            stream_url = response.url
+            print(f"M3U8 (response) bulundu: {stream_url}")
+
     page.on("request", handle_request)
+    page.on("response", handle_response)
 
     try:
         print(f"Sayfa açılıyor: {full_url}")
@@ -247,28 +216,28 @@ async def get_stream_url(page, full_url):
         await page.wait_for_timeout(WAIT_AFTER_LOAD)
 
     except Exception as error:
-        print(f"Sayfa yükleme hatası: {error}")
+        error_msg = str(error)
+        print(f"Sayfa yükleme hatası: {error_msg}")
+        if is_fatal_net_error(error_msg):
+            fatal_net_error = True
 
     finally:
         page.remove_listener("request", handle_request)
+        page.remove_listener("response", handle_response)
 
-    return stream_url
+    return stream_url, fatal_net_error
 
 # ==================================================
 # M3U DOSYASI GÜNCELLEME
 # ==================================================
 
-def update_playlist(updated_links):
-
+def update_playlist(updated_links: dict):
     if not OUTPUT_FILE.exists():
-        raise FileNotFoundError(
-            f"{OUTPUT_FILE} dosyası bulunamadı!"
-        )
+        raise FileNotFoundError(f"{OUTPUT_FILE} dosyası bulunamadı!")
 
     if not updated_links:
         raise RuntimeError(
-            "Hiçbir yeni bağlantı bulunamadı. "
-            "Playlist değiştirilmedi."
+            "Hiçbir yeni bağlantı bulunamadı. Playlist değiştirilmedi."
         )
 
     normalized_links = {}
@@ -277,11 +246,7 @@ def update_playlist(updated_links):
         if norm_key:
             normalized_links[norm_key] = (channel_name, stream_url)
 
-    with OUTPUT_FILE.open(
-        "r",
-        encoding="utf-8-sig"
-    ) as file:
-
+    with OUTPUT_FILE.open("r", encoding="utf-8-sig") as file:
         lines = file.readlines()
 
     new_lines = []
@@ -290,7 +255,6 @@ def update_playlist(updated_links):
     i = 0
 
     while i < len(lines):
-
         line = lines[i]
         matched_key = None
 
@@ -302,36 +266,23 @@ def update_playlist(updated_links):
                     break
 
         if matched_key:
-
             new_lines.append(line)
             i += 1
 
-            # EXTINF satırından sonraki seçenekleri koru.
-            while (
-                i < len(lines)
-                and lines[i].strip().startswith("#")
-            ):
+            while i < len(lines) and lines[i].strip().startswith("#"):
                 new_lines.append(lines[i])
                 i += 1
 
-            # Eski URL satırını yeni URL ile değiştir.
             if i < len(lines) and not lines[i].strip().startswith("#"):
-
-                orig_name, new_url = normalized_links[matched_key]
+                _, new_url = normalized_links[matched_key]
                 new_lines.append(new_url + "\n")
                 matched_keys.add(matched_key)
                 updated_count += 1
                 i += 1
-
             else:
                 orig_name, _ = normalized_links[matched_key]
-                print(
-                    f"UYARI: {orig_name} için "
-                    "eski URL satırı bulunamadı."
-                )
-
+                print(f"UYARI: {orig_name} için eski URL satırı bulunamadı.")
         else:
-
             new_lines.append(line)
             i += 1
 
@@ -347,13 +298,9 @@ def update_playlist(updated_links):
         )
 
     if updated_count == 0:
-        raise RuntimeError(
-            "M3U içerisinde güncellenecek kanal bulunamadı!"
-        )
+        raise RuntimeError("M3U içerisinde güncellenecek kanal bulunamadı!")
 
-    # Önce geçici dosyaya yaz, ardından atomik olarak değiştir.
     temp_path = None
-
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -362,7 +309,6 @@ def update_playlist(updated_links):
             dir=str(OUTPUT_FILE.parent),
             delete=False
         ) as temp_file:
-
             temp_path = Path(temp_file.name)
             temp_file.writelines(new_lines)
 
@@ -372,72 +318,67 @@ def update_playlist(updated_links):
         if temp_path and temp_path.exists():
             temp_path.unlink()
 
-    print(
-        f"Playlist güncellendi. "
-        f"Toplam güncellenen kanal: {updated_count}"
-    )
+    print(f"Playlist güncellendi. Toplam güncellenen kanal: {updated_count}")
 
 # ==================================================
 # ANA PROGRAM
 # ==================================================
 
 async def main():
-
     print("=" * 50)
     print("BOSS TV PLAYLIST GÜNCELLEYİCİ")
     print("=" * 50)
 
-    # 1. Aktif domain bul.
     active_base_url = get_active_base_domain()
-
     updated_links = {}
+    consecutive_net_errors = 0
+    domain_dead = False
 
-    # 2. Tarayıcıyı başlat.
     async with async_playwright() as p:
-
-        browser = await p.chromium.launch(
-            headless=True
-        )
+        browser = await p.chromium.launch(headless=True)
 
         try:
-
             page = await browser.new_page()
 
             for channel in CHANNELS_TO_UPDATE:
+                full_url = active_base_url + channel["path"]
+                print(f"\nTaranıyor: {channel['name']}")
 
-                full_url = (
-                    active_base_url + channel["path"]
-                )
-
-                print(
-                    f"\nTaranıyor: {channel['name']}"
-                )
-
-                stream_url = await get_stream_url(
-                    page,
-                    full_url
-                )
+                stream_url, fatal_net_error = await get_stream_url(page, full_url)
 
                 if stream_url:
-
                     updated_links[channel["name"]] = stream_url
-
+                    consecutive_net_errors = 0
                     print("Bağlantı başarıyla alındı.")
-
                 else:
+                    print("Yeni bağlantı alınamadı. Eski bağlantı korunacak.")
+                    if fatal_net_error:
+                        consecutive_net_errors += 1
+                        # Önceki başarısız navigasyonun sonraki sayfa açılışını kesmesini önle
+                        await page.close()
+                        page = await browser.new_page()
+                    else:
+                        consecutive_net_errors = 0
 
+                if consecutive_net_errors >= MAX_CONSECUTIVE_NET_ERRORS:
                     print(
-                        "Yeni bağlantı alınamadı. "
-                        "Eski bağlantı korunacak."
+                        f"\nArt arda {consecutive_net_errors} kanalda temel ağ/DNS hatası oluştu. "
+                        f"Domain ({active_base_url}) erişilemez kabul ediliyor."
                     )
+                    domain_dead = True
+                    break
 
         finally:
-
             await browser.close()
 
-    # 3. Playlist'i güncelle.
-    update_playlist(updated_links)
+    if domain_dead and CACHE_FILE.exists():
+        try:
+            CACHE_FILE.unlink()
+            print(f"Bozuk cache dosyası silindi: {CACHE_FILE}")
+        except OSError:
+            pass
 
+    update_playlist(updated_links)
     print("\nİŞLEM BAŞARIYLA TAMAMLANDI!")
 
 # ==================================================
@@ -445,13 +386,9 @@ async def main():
 # ==================================================
 
 if __name__ == "__main__":
-
     try:
         asyncio.run(main())
-
     except Exception as error:
-
         print("\nPROGRAM HATASI:")
         print(error)
-
         raise
