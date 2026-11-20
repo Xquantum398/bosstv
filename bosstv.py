@@ -19,11 +19,16 @@ BASE_SUFFIX = ".com"
 START_NUM = 1074
 END_NUM = 3000
 
+KNOWN_DOMAINS = [
+    "https://bosssports1079.com",
+    "https://bosssports1111.com",
+]
+
 CACHE_FILE = Path("domain_cache1.txt")
 OUTPUT_FILE = Path("tv247tr.m3u")
 
 MAX_WORKERS = 80
-REQUEST_TIMEOUT = 4
+REQUEST_TIMEOUT = 5
 PAGE_TIMEOUT = 45000
 WAIT_AFTER_LOAD = 6000
 MAX_CONSECUTIVE_NET_ERRORS = 3
@@ -112,9 +117,6 @@ def normalize_channel_name(name: str) -> str:
 # ==================================================
 
 def test_url_is_active(url: str):
-    """
-    Aktifse (True, "OK") döner; değilse (False, sebep) döner.
-    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -152,14 +154,24 @@ def check_single_domain_num(num: int):
 
 
 def get_active_base_domain() -> str:
+    candidates = []
+
     if CACHE_FILE.exists():
         cached_url = CACHE_FILE.read_text(encoding="utf-8").strip()
         if cached_url:
-            ok, reason = test_url_is_active(cached_url)
-            if ok:
-                print(f"Aktif cache domaini: {cached_url} ({reason})")
-                return cached_url
-            print(f"Cache domaini çalışmıyor ({cached_url} -> {reason}), yeni domain aranıyor.")
+            candidates.append(cached_url)
+
+    for domain in KNOWN_DOMAINS:
+        if domain not in candidates:
+            candidates.append(domain)
+
+    for candidate in candidates:
+        ok, reason = test_url_is_active(candidate)
+        if ok:
+            print(f"Aktif domain doğrulandı: {candidate} ({reason})")
+            CACHE_FILE.write_text(candidate, encoding="utf-8")
+            return candidate
+        print(f"Domain yanıt vermedi ({candidate} -> {reason}).")
 
     print(f"Domain taraması başladı: {START_NUM}-{END_NUM - 1} (workers={MAX_WORKERS})")
 
