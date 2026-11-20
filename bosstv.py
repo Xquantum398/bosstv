@@ -1,128 +1,184 @@
-import json
-from pathlib import Path
-from urllib.parse import urlsplit
 import requests
+import re
 
-API_URL = "https://bosssports1079.com/api/matches"
-OUTPUT_M3U = Path("all_matches.m3u")
+# --- Ayarlar ---
+CHANNELS_API = "https://bosssports1078.com/api/channels"
+MATCHES_API = "https://bosssports1078.com/api/matches"
+BASE_SITE = "https://bosssports1078.com/"
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+REFERER = "https://bosssports1078.com/"
 
-VLC_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/158.0.0.0 Safari/537.36"
-)
+CHANNELS_FILE = "boss.m3u"
+MATCHES_FILE = "boss2.m3u"
 
+# Sadece bu kategoriler alınacak (küçük harfle, kısmi eşleşme)
+ALLOWED_CATEGORIES = ["football",  "futbol"]
 
-def get_referrer(api_url: str) -> str:
-    parsed = urlsplit(api_url.strip())
-    if parsed.scheme and parsed.netloc:
-        return f"{parsed.scheme}://{parsed.netloc}/"
-    return "https://bosssports1079.com/"
-
-
-def collect_links_from_record(item: dict) -> list[tuple[str, str]]:
-    """Kayıttaki videoid, streams ve diğer olası yayın alanlarından (etiket, url) listesi döndürür."""
-    results: list[tuple[str, str]] = []
-
-    videoid = item.get("videoid")
-    if isinstance(videoid, str) and videoid.strip().startswith(("http://", "https://")):
-        results.append(("videoid", videoid.strip()))
-
-    streams = item.get("streams")
-    if isinstance(streams, list):
-        for idx, s in enumerate(streams, start=1):
-            if isinstance(s, dict):
-                s_url = s.get("url")
-                s_name = (s.get("name") or s.get("id") or f"Stream {idx}").strip()
-                if isinstance(s_url, str) and s_url.strip().startswith(("http://", "https://")):
-                    results.append((s_name, s_url.strip()))
-
-    # Farklı bir alan adı altında .m3u8 gelirse yakala
-    for key, val in item.items():
-        if key in ("videoid", "streams"):
-            continue
-        if isinstance(val, str) and ".m3u8" in val.lower() and val.strip().startswith(("http://", "https://")):
-            results.append((key, val.strip()))
-
-    # Sırayı koruyarak aynı URL tekrarlarını kaldır
-    seen = set()
-    unique_results = []
-    for label, url in results:
-        if url not in seen:
-            seen.add(url)
-            unique_results.append((label, url))
-
-    return unique_results
+# Maçlar için tek grup adı
+MATCH_GROUP = "Canlı Maçlar"
 
 
-def build_title(item: dict) -> str:
-    home = (item.get("home") or "").strip()
-    away = (item.get("away") or "").strip()
-    league = (item.get("league") or "").strip()
-    category = (item.get("category") or "").strip()
-    match_id = str(item.get("id") or "").strip()
-
-    teams = f"{home} vs {away}".strip(" vs")
-    prefix = league or category
-    if teams and prefix:
-        return f"[{prefix}] {teams}"
-    return teams or prefix or f"Match {match_id or 'Unknown'}"
-
-
-def main(api_url: str = API_URL, out_path: Path = OUTPUT_M3U, deduplicate_urls: bool = False):
-    referrer = get_referrer(api_url)
+def fetch_json(url):
+    """URL'den JSON çeker, hata olursa None döner."""
     headers = {
-        "User-Agent": VLC_USER_AGENT,
-        "Accept": "application/json, text/plain, */*",
-        "Referer": referrer,
+        "User-Agent": USER_AGENT,
+        "referer": BASE_SITE,
+        "accept": "application/json",
     }
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+    except Exception as e:
+        print(f"❌ İstek hatası ({url}): {e}")
+        return None
 
-    resp = requests.get(api_url, headers=headers, timeout=20)
-    resp.raise_for_status()
-    payload = resp.json()
+    print(f"[{url}] Status: {r.status_code}, Uzunluk: {len(r.text)}")
+    if r.status_code != 200:
+        print(f"   Yanıtın başı: {r.text[:300]}")
+        return None
+    try:
+        return r.json()
+    except Exception as e:
+        print(f"❌ JSON parse hatası ({url}): {e}")
+        print(f"   Yanıtın başı: {r.text[:300]}")
+        return None
 
-    items = payload.get("data", []) if isinstance(payload, dict) else []
-    if not isinstance(items, list):
-        raise ValueError("API yanıtında 'data' listesi bulunamadı.")
 
-    m3u_lines = ["#EXTM3U\n"]
-    global_seen_urls = set()
-    total_exported = 0
+def get_stream_url(item):
+    """Bir kayıttan yayın linkini çıkarır: streams[].url (isPlayed öncelikli) -> videoid."""
+    streams = item.get("streams", [])
+    if streams:
+        played = next((s for s in streams if s.get("isPlayed")), None)
+        chosen = played or streams[0]
+        url = chosen.get("url", "")
+        if url:
+            return url
+    return item.get("videoid", "")
 
-    for item in items:
-        if not isinstance(item, dict):
+
+def clean_league(league):
+    """'21:00 | | UEFA Şampiyonlar Ligi' -> ('21:00', 'UEFA Şampiyonlar Ligi')"""
+    if not league:
+        return "", ""
+    parts = [p.strip() for p in league.split("|") if p.strip()]
+    if not parts:
+        return "", league.strip()
+
+    time_val = ""
+    if re.match(r"^\d{1,2}:\d{2}$", parts[0]):
+        time_val = parts[0]
+        league_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+    else:
+        league_name = " ".join(parts)
+    return time_val, league_name
+
+
+def is_allowed_category(category):
+    """Kategori futbol/voleybol/basketbol mu?"""
+    cat = (category or "").lower()
+    return any(key in cat for key in ALLOWED_CATEGORIES)
+
+
+def write_m3u(entries, filename):
+    """entries: (group_title, title, stream_url) listesi"""
+    lines = ["#EXTM3U"]
+    for group_title, title, url in entries:
+        lines.append(f'#EXTINF:-1 group-title="{group_title}",{title}')
+        lines.append(f"#EXTVLCOPT:http-user-agent={USER_AGENT}")
+        lines.append(f"#EXTVLCOPT:http-referrer={REFERER}")
+        lines.append(url)
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def build_channels():
+    """boss.m3u -> 7/24 kanallar"""
+    payload = fetch_json(CHANNELS_API)
+    if not payload:
+        write_m3u([], CHANNELS_FILE)
+        print("⚠️  Kanallar çekilemedi, boş boss.m3u yazıldı.")
+        return
+
+    channels = payload.get("data", [])
+    print(f"Kanal sayısı: {len(channels)}")
+
+    entries = []
+    for ch in channels:
+        title = (ch.get("home") or "").strip()
+        url = get_stream_url(ch)
+        if not title or not url:
+            continue
+        group = ch.get("league") or ch.get("category") or "7/24 Kanallar"
+        entries.append((group, title, url))
+
+    write_m3u(entries, CHANNELS_FILE)
+    print(f"✅ {len(entries)} kanal -> {CHANNELS_FILE}")
+
+
+def build_matches():
+    """boss2.m3u -> sadece futbol/voleybol/basketbol, tek grup, tekrarsız"""
+    payload = fetch_json(MATCHES_API)
+    if not payload:
+        write_m3u([], MATCHES_FILE)
+        print("⚠️  Maçlar çekilemedi, boş boss2.m3u yazıldı.")
+        return
+
+    matches = payload.get("data", [])
+    print(f"Ham maç kaydı sayısı: {len(matches)}")
+
+    entries = []
+    seen = set()
+    skipped_category = 0
+
+    for m in matches:
+        category = (m.get("category") or "").strip()
+
+        # Kategori filtresi
+        if not is_allowed_category(category):
+            skipped_category += 1
             continue
 
-        title = build_title(item)
-        source = (item.get("source") or "").strip()
-        links = collect_links_from_record(item)
+        match_id = m.get("id") or m.get("public_id")
+        if match_id and match_id in seen:
+            continue
 
-        for label, url in links:
-            if deduplicate_urls and url in global_seen_urls:
-                continue
-            global_seen_urls.add(url)
+        home = (m.get("home") or "").strip()
+        away = (m.get("away") or "").strip()
+        url = get_stream_url(m)
 
-            display_title = title
-            if len(links) > 1 or source:
-                extras = [x for x in (source, label if len(links) > 1 else "") if x]
-                if extras:
-                    display_title = f"{title} ({' | '.join(extras)})"
+        if not home or not url:
+            continue
 
-            block = (
-                f"#EXTINF:-1,{display_title}\n"
-                f"#EXTVLCOPT:http-user-agent={VLC_USER_AGENT}\n"
-                f"#EXTVLCOPT:http-referrer={referrer}\n"
-                f"{url}\n"
-            )
-            m3u_lines.append(block)
-            print(block.strip())
-            total_exported += 1
+        if away and away.lower() != "away":
+            title = f"{home} - {away}"
+        else:
+            title = home
 
-    out_path.write_text("".join(m3u_lines), encoding="utf-8")
-    print(f"\nToplam {total_exported} link '{out_path}' dosyasına yazdırıldı.")
+        time_val, league_name = clean_league(m.get("league", ""))
+        extra = " | ".join(x for x in [time_val, league_name] if x)
+        if extra:
+            title = f"{title} ({extra})"
+
+        if match_id:
+            seen.add(match_id)
+        entries.append((MATCH_GROUP, title, url))
+
+    print(f"Kategori dışı atlanan: {skipped_category}")
+    write_m3u(entries, MATCHES_FILE)
+    print(f"✅ {len(entries)} maç (futbol/voleybol/basketbol, tekrarsız) -> {MATCHES_FILE}")
+
+
+def main():
+    print("=" * 50)
+    print("KANALLAR")
+    print("=" * 50)
+    build_channels()
+
+    print("=" * 50)
+    print("MAÇLAR")
+    print("=" * 50)
+    build_matches()
 
 
 if __name__ == "__main__":
-    # API'deki erosmac ve erosmac-backup dahil tüm kayıtları almak için False bırakın;
-    # yalnızca farklı URL'leri tutmak isterseniz True yapabilirsiniz.
-    main(deduplicate_urls=False)
+    main()
