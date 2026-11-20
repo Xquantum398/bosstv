@@ -17,13 +17,13 @@ BASE_PREFIX = "https://bosssports"
 BASE_SUFFIX = ".com"
 
 START_NUM = 1074
-END_NUM = 2000
+END_NUM = 3000
 
 CACHE_FILE = Path("domain_cache1.txt")
 OUTPUT_FILE = Path("tv247tr.m3u")
 
-MAX_WORKERS = 50
-REQUEST_TIMEOUT = 5
+MAX_WORKERS = 80
+REQUEST_TIMEOUT = 4
 PAGE_TIMEOUT = 45000
 WAIT_AFTER_LOAD = 6000
 MAX_CONSECUTIVE_NET_ERRORS = 3
@@ -111,7 +111,10 @@ def normalize_channel_name(name: str) -> str:
 # DOMAIN KONTROLÜ
 # ==================================================
 
-def test_url_is_active(url: str) -> bool:
+def test_url_is_active(url: str):
+    """
+    Aktifse (True, "OK") döner; değilse (False, sebep) döner.
+    """
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -128,29 +131,40 @@ def test_url_is_active(url: str) -> bool:
             allow_redirects=True,
             stream=True
         ) as response:
-            return response.status_code < 400
-    except requests.RequestException:
-        return False
+            if response.status_code < 400:
+                return True, f"HTTP {response.status_code}"
+            return False, f"HTTP {response.status_code}"
+    except requests.ConnectionError as exc:
+        msg = str(exc)
+        if "NameResolutionError" in msg or "Failed to resolve" in msg or "nodename nor servname" in msg:
+            return False, "DNS_ERROR"
+        return False, "CONN_ERROR"
+    except requests.Timeout:
+        return False, "TIMEOUT"
+    except requests.RequestException as exc:
+        return False, f"REQ_ERR:{type(exc).__name__}"
 
 
 def check_single_domain_num(num: int):
     url = f"{BASE_PREFIX}{num}{BASE_SUFFIX}"
-    if test_url_is_active(url):
-        return url
-    return None
+    ok, reason = test_url_is_active(url)
+    return url, ok, reason
 
 
 def get_active_base_domain() -> str:
     if CACHE_FILE.exists():
         cached_url = CACHE_FILE.read_text(encoding="utf-8").strip()
+        if cached_url:
+            ok, reason = test_url_is_active(cached_url)
+            if ok:
+                print(f"Aktif cache domaini: {cached_url} ({reason})")
+                return cached_url
+            print(f"Cache domaini çalışmıyor ({cached_url} -> {reason}), yeni domain aranıyor.")
 
-        if cached_url and test_url_is_active(cached_url):
-            print(f"Aktif cache domaini: {cached_url}")
-            return cached_url
+    print(f"Domain taraması başladı: {START_NUM}-{END_NUM - 1} (workers={MAX_WORKERS})")
 
-        print("Cache domaini çalışmıyor, yeni domain aranıyor.")
-
-    print(f"Domain taraması başladı: {START_NUM}-{END_NUM - 1}")
+    reason_counts = {}
+    sample_reasons = {}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [
@@ -160,15 +174,24 @@ def get_active_base_domain() -> str:
 
         for future in concurrent.futures.as_completed(futures):
             try:
-                result = future.result()
-                if result:
-                    print(f"Aktif domain bulundu: {result}")
-                    CACHE_FILE.write_text(result, encoding="utf-8")
-                    return result
+                url, ok, reason = future.result()
+                if ok:
+                    print(f"Aktif domain bulundu: {url} ({reason})")
+                    CACHE_FILE.write_text(url, encoding="utf-8")
+                    return url
+
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+                if reason not in sample_reasons:
+                    sample_reasons[reason] = url
             except Exception as error:
                 print(f"Domain kontrol hatası: {error}")
 
-    raise RuntimeError("Belirtilen aralıkta aktif domain bulunamadı!")
+    summary = ", ".join(f"{k}:{v}" for k, v in sorted(reason_counts.items()))
+    samples = ", ".join(f"{k}={v}" for k, v in sample_reasons.items())
+    raise RuntimeError(
+        f"Belirtilen aralıkta aktif domain bulunamadı! "
+        f"Özet: [{summary}] | Örnekler: [{samples}]"
+    )
 
 # ==================================================
 # PLAYWRIGHT İLE M3U8 TESPİTİ
@@ -354,7 +377,6 @@ async def main():
                     print("Yeni bağlantı alınamadı. Eski bağlantı korunacak.")
                     if fatal_net_error:
                         consecutive_net_errors += 1
-                        # Önceki başarısız navigasyonun sonraki sayfa açılışını kesmesini önle
                         await page.close()
                         page = await browser.new_page()
                     else:
